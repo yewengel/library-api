@@ -1,7 +1,29 @@
+const dns = require('node:dns');
+
+// Use the DNS server that works with the current network
+dns.setServers(['172.20.10.1']);
+
 const express = require('express');
+const mongoose = require('mongoose');
+require('dotenv').config();
+
+const Book = require('./models/Book');
+const Author = require('./models/Author');
+
 const app = express();
 
 app.use(express.json());
+
+// Connect to MongoDB Atlas
+mongoose.connect(process.env.MONGODB_URI, {
+    dbName: 'library_db'
+})
+    .then(() => {
+        console.log('Connected to MongoDB Atlas - library_db');
+    })
+    .catch((err) => {
+        console.log('MongoDB connection error:', err.message);
+    });
 
 // Logger Middleware
 app.use((req, res, next) => {
@@ -9,36 +31,6 @@ app.use((req, res, next) => {
     console.log(`[${timestamp}] ${req.method} ${req.url}`);
     next();
 });
-
-// In-memory database
-let books = [
-    {
-        id: 1,
-        title: "The Pragmatic Programmer",
-        author: "Andrew Hunt",
-        year: 1999,
-        genre: "Technology",
-        available: true
-    },
-    {
-        id: 2,
-        title: "Clean Code",
-        author: "Robert Martin",
-        year: 2008,
-        genre: "Technology",
-        available: true
-    },
-    {
-        id: 3,
-        title: "The Hobbit",
-        author: "J.R.R. Tolkien",
-        year: 1937,
-        genre: "Fantasy",
-        available: false
-    }
-];
-
-let nextId = 4;
 
 // Authentication Middleware
 function isLibrarian(req, res, next) {
@@ -58,191 +50,146 @@ function isLibrarian(req, res, next) {
 }
 
 // ROUTE 1: Get all books
-app.get('/api/books', (req, res) => {
-    let result = [...books];
+app.get('/api/books', async (req, res) => {
+    try {
+        const filter = {};
 
-    if (req.query.genre) {
-        result = result.filter(
-            book => book.genre.toLowerCase() ===
-                req.query.genre.toLowerCase()
-        );
+        // Filter by genre
+        if (req.query.genre) {
+            filter.genre = req.query.genre;
+        }
+
+        // Filter by availability
+        if (req.query.available !== undefined) {
+            if (!['true', 'false'].includes(req.query.available)) {
+                return res.status(400).json({
+                    error: "Invalid available value. Use true or false"
+                });
+            }
+
+            filter.available = req.query.available === 'true';
+        }
+
+        const books = await Book.find(filter).populate('author');
+        return res.status(200).json(books);
+
+    } catch (error) {
+        return res.status(500).json({
+            error: error.message
+        });
     }
+});
 
-    if (req.query.available !== undefined) {
-        if (!['true', 'false'].includes(req.query.available)) {
-            return res.status(400).json({
-                error: "Invalid available value. Use true or false"
+// ROUTE 2: Get one book by ID
+app.get('/api/books/:id', async (req, res) => {
+    try {
+        const book = await Book.findById(req.params.id).populate('author');
+
+        if (!book) {
+            return res.status(404).json({
+                error: "Book not found"
             });
         }
 
-        const available = req.query.available === 'true';
+        return res.status(200).json(book);
 
-        result = result.filter(
-            book => book.available === available
-        );
-    }
-
-    return res.status(200).json(result);
-});
-
-// ROUTE 2: Get a book by ID
-app.get('/api/books/:id', (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id <= 0) {
+    } catch (error) {
         return res.status(400).json({
             error: "Invalid book ID"
         });
     }
-
-    const book = books.find(book => book.id === id);
-
-    if (!book) {
-        return res.status(404).json({
-            error: "Book not found"
-        });
-    }
-
-    return res.status(200).json(book);
 });
 
-// ROUTE 3: Create a book
-app.post('/api/books', isLibrarian, (req, res) => {
-    const { title, author, year, genre } = req.body;
+// ROUTE 3: Create a new book
+app.post('/api/books', isLibrarian, async (req, res) => {
+    try {
+        const { title, author, year, genre, available } = req.body;
 
-    if (
-        typeof title !== 'string' || !title.trim() ||
-        typeof author !== 'string' || !author.trim() ||
-        year === undefined || year === null || year === '' ||
-        typeof genre !== 'string' || !genre.trim()
-    ) {
+        const newBook = await Book.create({
+            title,
+            author,
+            year,
+            genre,
+            available
+        });
+
+        res.location(`/api/books/${newBook._id}`);
+
+        return res.status(201).json(newBook);
+
+    } catch (error) {
         return res.status(400).json({
-            error: "Missing required fields"
+            error: error.message
         });
     }
-
-    const numericYear = Number(year);
-
-    if (
-        !Number.isInteger(numericYear) ||
-        numericYear < 0 ||
-        numericYear > new Date().getFullYear()
-    ) {
-        return res.status(400).json({
-            error: "Invalid year"
-        });
-    }
-
-    const newBook = {
-        id: nextId++,
-        title: title.trim(),
-        author: author.trim(),
-        year: numericYear,
-        genre: genre.trim(),
-        available: true
-    };
-
-    books.push(newBook);
-    res.location(`/api/books/${newBook.id}`);
-
-    return res.status(201).json(newBook);
 });
 
 // ROUTE 4: Update a book
-app.put('/api/books/:id', isLibrarian, (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id <= 0) {
-        return res.status(400).json({
-            error: "Invalid book ID"
-        });
-    }
-
-    const book = books.find(book => book.id === id);
-
-    if (!book) {
-        return res.status(404).json({
-            error: "Book not found"
-        });
-    }
-
-    const { title, author, year, genre, available } = req.body;
-
-    if (Object.keys(req.body).length === 0) {
-        return res.status(400).json({
-            error: "Provide at least one field to update"
-        });
-    }
-
-    if (title !== undefined) {
-        if (typeof title !== 'string' || !title.trim()) {
-            return res.status(400).json({ error: "Invalid title" });
-        }
-        book.title = title.trim();
-    }
-
-    if (author !== undefined) {
-        if (typeof author !== 'string' || !author.trim()) {
-            return res.status(400).json({ error: "Invalid author" });
-        }
-        book.author = author.trim();
-    }
-
-    if (year !== undefined) {
-        const numericYear = Number(year);
-
-        if (
-            year === '' ||
-            !Number.isInteger(numericYear) ||
-            numericYear < 0 ||
-            numericYear > new Date().getFullYear()
-        ) {
-            return res.status(400).json({ error: "Invalid year" });
-        }
-
-        book.year = numericYear;
-    }
-
-    if (genre !== undefined) {
-        if (typeof genre !== 'string' || !genre.trim()) {
-            return res.status(400).json({ error: "Invalid genre" });
-        }
-        book.genre = genre.trim();
-    }
-
-    if (available !== undefined) {
-        if (typeof available !== 'boolean') {
+app.put('/api/books/:id', isLibrarian, async (req, res) => {
+    try {
+        if (Object.keys(req.body).length === 0) {
             return res.status(400).json({
-                error: "Invalid available value"
+                error: "Provide at least one field to update"
             });
         }
-        book.available = available;
-    }
 
-    return res.status(200).json(book);
+        const updatedBook = await Book.findByIdAndUpdate(
+            req.params.id,
+            req.body,
+            {
+                new: true,
+                runValidators: true
+            }
+        );
+
+        if (!updatedBook) {
+            return res.status(404).json({
+                error: "Book not found"
+            });
+        }
+
+        return res.status(200).json(updatedBook);
+
+    } catch (error) {
+        return res.status(400).json({
+            error: error.message
+        });
+    }
 });
 
 // ROUTE 5: Delete a book
-app.delete('/api/books/:id', isLibrarian, (req, res) => {
-    const id = Number(req.params.id);
+app.delete('/api/books/:id', isLibrarian, async (req, res) => {
+    try {
+        const deletedBook = await Book.findByIdAndDelete(req.params.id);
 
-    if (!Number.isInteger(id) || id <= 0) {
+        if (!deletedBook) {
+            return res.status(404).json({
+                error: "Book not found"
+            });
+        }
+
+        return res.status(204).send();
+
+    } catch (error) {
         return res.status(400).json({
             error: "Invalid book ID"
         });
     }
+});
 
-    const index = books.findIndex(book => book.id === id);
+// Create a new author
+app.post('/api/authors', isLibrarian, async (req, res) => {
+    try {
+        const author = await Author.create({
+            name: req.body.name
+        });
 
-    if (index === -1) {
-        return res.status(404).json({
-            error: "Book not found"
+        return res.status(201).json(author);
+    } catch (error) {
+        return res.status(400).json({
+            error: error.message
         });
     }
-
-    books.splice(index, 1);
-
-    return res.status(204).send();
 });
 
 // 404 Handler
